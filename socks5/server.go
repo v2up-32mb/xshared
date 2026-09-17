@@ -409,7 +409,10 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 		return
 	}
 
-	targetAddr := net.JoinHostPort(strings.TrimPrefix(resolvedHost, "["), strconv.Itoa(int(port)))
+	// resolvedHost 对纯 IPv6 已补方括号（:389-390），此处必须双侧剥括号后重新
+	// JoinHostPort；若只剥左侧会构造出 "[2001:db8::1]]:443" 畸形目标（终审 B1）
+	host := strings.TrimSuffix(strings.TrimPrefix(resolvedHost, "["), "]")
+	targetAddr := net.JoinHostPort(host, strconv.Itoa(int(port)))
 	startedAt := time.Now()
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.dialTimeout())

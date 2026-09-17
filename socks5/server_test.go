@@ -3,6 +3,7 @@ package socks5
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -662,5 +663,50 @@ func TestUDPFramingRoundTrip(t *testing.T) {
 	t2, d2, err := parseSOCKS5UDPPacket(rebuilt)
 	if err != nil || t2 != target || string(d2) != "z" {
 		t.Fatalf("重建往返不符: %q %q %v", t2, d2, err)
+	}
+}
+
+// TestConnectIPv6TargetFormat 回归（终审 B1）：IPv6 目标经 DialStream 时必须
+// 构造为合法 "host:port"（如 "[2001:db8::1]:443"），不得出现 "[...]]:port" 畸形。
+func TestConnectIPv6TargetFormat(t *testing.T) {
+	d := &fakeStreamDialer{fn: func(d *fakeStreamDialer, ctx context.Context, target string) (net.Conn, error) {
+		// 目标必须能被 SplitHostPort 解析（畸形 "[h]]:p" 在此报错）
+		if _, _, err := net.SplitHostPort(target); err != nil {
+			return nil, fmt.Errorf("目标地址无效 %q: %w", target, err)
+		}
+		c1, c2 := net.Pipe()
+		go func() {
+			_, _ = io.Copy(c1, c2)
+		}()
+		return c2, nil
+	}}
+	_, addr := newTestServer(t, d)
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	socksHandshake(t, conn, []byte{authNone}, "", "")
+
+	// ATYP_IPV6 字面量：resolvedHost 走 ：389-390 补括号分支，与域名解析为 IPv6 同路
+	req := []byte{socks5Version, cmdConnect, 0x00, atypIPv6}
+	req = append(req, net.ParseIP("2001:db8::1").To16()...)
+	req = binary.BigEndian.AppendUint16(req, 443)
+	if _, err := conn.Write(req); err != nil {
+		t.Fatalf("写 CONNECT: %v", err)
+	}
+	resp := make([]byte, 10)
+	if _, err := io.ReadFull(conn, resp); err != nil {
+		t.Fatalf("读 CONNECT 应答: %v", err)
+	}
+	if resp[1] != 0x00 {
+		t.Fatalf("CONNECT 应答非成功: %v", resp)
+	}
+	got := d.dialTargets()
+	if len(got) != 1 || got[0] != "[2001:db8::1]:443" {
+		t.Fatalf("DialStream 目标 = %v, want [[2001:db8::1]:443]", got)
 	}
 }
