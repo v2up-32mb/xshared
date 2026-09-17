@@ -74,6 +74,11 @@ func NewDuration(d time.Duration) yamlDuration {
 	return yamlDuration{d}
 }
 
+// NewByteSize 构造配置中的字节大小字段值（外部包设置 WindowSize 等字段用）。
+func NewByteSize(n int64) yamlByteSize {
+	return yamlByteSize{n}
+}
+
 // yamlByteSize 是字节大小的包装器（历史命名：CLI 时代用于 YAML/JSON
 // 配置文件解析；现仅承载字节数值，由函数参数直接赋值）。
 type yamlByteSize struct {
