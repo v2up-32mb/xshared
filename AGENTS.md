@@ -27,14 +27,19 @@ xtunnel-cli / x-client(壳: 参数/渲染/部署)
    或放到协议库中。
 3. **能力上移方向**：若某通用能力被发现在协议库（如 xtunnel）重复实现，应**上移到此库**
    并让协议库改调（避免重复造轮子）。新增能力按 `CHANGELOG.md` 版本纪律发布。
-4. 每个包必须有职责说明与单测；并发相关改动必须 `go test -race` 验证。
+5. **能力上移方向**：若某通用能力被发现在协议库（如 xtunnel）重复实现，应**上移到此库**
+   并让协议库改调（避免重复造轮子）。新增能力按 `CHANGELOG.md` 版本纪律发布。
+6. **发版铁律（最高优先级）**：**绝不未经人工确认就自行打 tag 并推送**。
+   任何发版动作（打 tag、`push --tags`、创建 release）必须先向用户明确汇报版本号与发布内容并获得批准；
+   提交/推送日常分支不在此限。
 
 ## 版本与发版流程
 
 - 破坏性变更升 **minor**，修复/新增升 **patch**（0.x 阶段同理）。
 - 消费方（xtunnel/xtunnel-cli/x-client/xshared 壳）独立 pin 版本，不要求同步升级。
 - 发版前：`go test ./... -race` 全绿 → `CHANGELOG.md` 记入（变更 + 升级指引）→
-  `README.md` 包清单/能力同步 → 打 tag 并 `git push origin main --tags`。
+  `README.md` 包清单/能力同步 → **向用户汇报版本号与发布内容并获批准** →
+  打 tag 并 `git push origin main --tags`。
 
 ## 结构速览
 
