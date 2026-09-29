@@ -5,6 +5,23 @@
 
 ---
 
+## v0.1.2 — 2026-09-29
+
+**Added**
+
+- **`Config.ProxyAll bool`**（`proxyAll`）：强制所有流量走回退出口。消费方（gcm 核心库）
+  据此在 WebSocket 连接 URL 上携带 `proxy-all=true`，Worker 侧**跳过「直连」一级**，
+  直接从 `?fallbackip=` 起步走回退链。默认 `false` = 旧行为（直连优先）。
+
+**升级指引**
+
+- 纯新增字段，**非破坏性**：不设即为 `false`，旧消费方无需改动即可照常编译运行。
+  真正生效还需 gcm 库仓消费该字段（`buildWSSURL` 拼 query）+ gcm-cli 暴露 `--proxy-all`。
+- 对**旧版 Worker**（不认 `proxy-all` 的 gcm-worker）同样安全：Worker 只读自己认识的
+  query 参数，多带的 `proxy-all=true` 会被忽略，行为退化为「仍先直连」。
+
+---
+
 ## v0.1.1 — 2026-09-26
 
 **Added**
