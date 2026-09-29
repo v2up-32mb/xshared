@@ -5,6 +5,17 @@
 
 ---
 
+## 未发版（v0.1.3，待批准打 tag）
+
+**Docs（无代码行为变更；字段注释同步 gcm-worker 的代理语义演进）**
+
+- `Config.ProxyIP` / `Config.ProxyAll` 注释更新：`ProxyIP` 非 proxyAll 时是 L4 覆盖出口偏好；
+  `ProxyAll=true` 时 Worker 侧（gcm-worker v0.1.3+）**只用 socks5 出口**，`ProxyIP` 此时必须是
+  socks5 服务器配置 `[socks5h?://][user:pass@]host[:port]`。协议与 URL 结构不变（仍是
+  `?fallbackip=` + `?proxy-all=true`），消费方无需改代码。
+
+---
+
 ## v0.1.2 — 2026-09-29
 
 **Added**
