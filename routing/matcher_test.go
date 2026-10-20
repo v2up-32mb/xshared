@@ -97,3 +97,49 @@ func TestValidateManualRulesRejectsBroadMappedIPv4Prefix(t *testing.T) {
 		t.Fatal("ValidateManualRules() error = nil")
 	}
 }
+
+func TestNewMatcherWithForceProxy(t *testing.T) {
+	// bypass: geosite:cn includes qq.com; forceProxy overrides for gstatic.com
+	m, err := NewMatcherWithForceProxy(true, false, true, "", "gstatic.com\nfull:api.example.com")
+	if err != nil {
+		t.Fatalf("NewMatcherWithForceProxy() error = %v", err)
+	}
+
+	// Normally bypassed (private) but not in forceProxy — still bypassed
+	if !m.Match("192.168.1.1", "192.168.1.1") {
+		t.Error("private IP should still be bypassed when not in forceProxy")
+	}
+	// Normally bypassed (geosite:cn) but not in forceProxy — still bypassed
+	if !m.Match("qq.com", "") {
+		t.Error("geosite:cn domain qq.com should still be bypassed when not in forceProxy")
+	}
+	// In forceProxy (suffix) — NOT bypassed even though geosite:cn might match
+	if m.Match("www.gstatic.com", "") {
+		t.Error("www.gstatic.com is in forceProxy, Match() should return false")
+	}
+	if m.Match("gstatic.com", "") {
+		t.Error("gstatic.com is in forceProxy (suffix), Match() should return false")
+	}
+	// In forceProxy (full exact)
+	if m.Match("api.example.com", "") {
+		t.Error("api.example.com is in forceProxy (full), Match() should return false")
+	}
+	// Subdomain of full: NOT matched
+	if m.Match("v1.api.example.com", "") {
+		t.Error("v1.api.example.com is not in forceProxy full list, should not be force-proxied")
+		// but it also shouldn't bypass unless it actually matches a bypass rule
+	}
+}
+
+func TestValidateForceProxyRules(t *testing.T) {
+	if err := ValidateForceProxyRules("gstatic.com\nfull:www.example.com"); err != nil {
+		t.Fatalf("ValidateForceProxyRules() error = %v", err)
+	}
+	if err := ValidateForceProxyRules("not a valid domain!"); err == nil {
+		t.Fatal("ValidateForceProxyRules() error = nil for invalid input")
+	}
+	// IP/CIDR should be silently skipped, not error
+	if err := ValidateForceProxyRules("192.168.0.0/16\ngstatic.com"); err != nil {
+		t.Fatalf("ValidateForceProxyRules() IP/CIDR should be silently skipped, got error = %v", err)
+	}
+}
