@@ -35,6 +35,11 @@ type Matcher struct {
 	exactDomains   map[string]struct{}
 	keywords       []string
 	regexps        []*regexp.Regexp
+
+	// forceProxy overrides bypass: hosts matching these rules always go through
+	// the tunnel regardless of any bypass rule.
+	forceProxySuffixes map[string]struct{}
+	forceProxyExact    map[string]struct{}
 }
 
 // NewMatcher builds a matcher from predefined groups and newline-separated
@@ -76,10 +81,44 @@ func ValidateManualRules(rules string) error {
 	return err
 }
 
+// NewMatcherWithForceProxy is like NewMatcher but also accepts forceProxyRules —
+// a newline-separated list of domains that must always go through the proxy,
+// even when they would otherwise match a bypass rule.
+// forceProxyRules supports the same domain: / suffix: / full: prefixes as
+// manualRules; IP/CIDR entries are silently ignored.
+func NewMatcherWithForceProxy(bypassPrivate, bypassGeoIPCN, bypassGeoSiteCN bool, manualRules, forceProxyRules string) (*Matcher, error) {
+	m, err := NewMatcher(bypassPrivate, bypassGeoIPCN, bypassGeoSiteCN, manualRules)
+	if err != nil {
+		return nil, err
+	}
+	m.forceProxySuffixes = make(map[string]struct{})
+	m.forceProxyExact = make(map[string]struct{})
+	if err := m.parseForceProxyRules(forceProxyRules); err != nil {
+		return nil, fmt.Errorf("invalid force-proxy rules: %w", err)
+	}
+	return m, nil
+}
+
+// ValidateForceProxyRules validates the syntax accepted by the forceProxyRules
+// argument of NewMatcherWithForceProxy.
+func ValidateForceProxyRules(rules string) error {
+	m := &Matcher{
+		forceProxySuffixes: make(map[string]struct{}),
+		forceProxyExact:    make(map[string]struct{}),
+	}
+	return m.parseForceProxyRules(rules)
+}
+
 // Match reports whether either the original SOCKS host or its resolved IP
 // matches a bypass rule.
+// If the host also matches a force-proxy rule, bypass is suppressed and Match
+// returns false (i.e. the connection goes through the tunnel).
 func (m *Matcher) Match(originalHost, resolvedHost string) bool {
 	if m == nil {
+		return false
+	}
+	// Force-proxy exceptions take priority over all bypass rules.
+	if m.matchForceProxy(originalHost) {
 		return false
 	}
 	if addr, err := parseAddr(originalHost); err == nil && m.matchAddr(addr) {
@@ -299,6 +338,73 @@ func (m *Matcher) matchDomain(domain string) bool {
 		if re.MatchString(domain) {
 			return true
 		}
+	}
+	return false
+}
+
+// parseForceProxyRules parses domain-only force-proxy rules (IP/CIDR silently
+// skipped since the forceProxy check only runs on domain-form hosts).
+func (m *Matcher) parseForceProxyRules(rules string) error {
+	scanner := bufio.NewScanner(strings.NewReader(rules))
+	lineNumber := 0
+	for scanner.Scan() {
+		lineNumber++
+		line := strings.TrimSpace(scanner.Text())
+		if comment := strings.IndexByte(line, '#'); comment >= 0 {
+			line = strings.TrimSpace(line[:comment])
+		}
+		if line == "" {
+			continue
+		}
+		// Silently skip IP/CIDR entries.
+		if _, err := netip.ParsePrefix(line); err == nil {
+			continue
+		}
+		if _, err := parseAddr(line); err == nil {
+			continue
+		}
+		kind := "domain"
+		value := line
+		if left, right, found := strings.Cut(line, ":"); found {
+			kind = strings.ToLower(strings.TrimSpace(left))
+			value = strings.TrimSpace(right)
+		}
+		domain, ok := normalizeDomain(value)
+		if !ok {
+			return fmt.Errorf("line %d: invalid force-proxy domain %q", lineNumber, line)
+		}
+		switch kind {
+		case "domain", "suffix":
+			m.forceProxySuffixes[domain] = struct{}{}
+		case "full":
+			m.forceProxyExact[domain] = struct{}{}
+		default:
+			return fmt.Errorf("line %d: unsupported force-proxy rule type %q", lineNumber, kind)
+		}
+	}
+	return scanner.Err()
+}
+
+func (m *Matcher) matchForceProxy(host string) bool {
+	if len(m.forceProxySuffixes) == 0 && len(m.forceProxyExact) == 0 {
+		return false
+	}
+	domain, ok := normalizeDomain(host)
+	if !ok {
+		return false
+	}
+	if _, ok := m.forceProxyExact[domain]; ok {
+		return true
+	}
+	for suffix := domain; suffix != ""; {
+		if _, ok := m.forceProxySuffixes[suffix]; ok {
+			return true
+		}
+		dot := strings.IndexByte(suffix, '.')
+		if dot < 0 {
+			break
+		}
+		suffix = suffix[dot+1:]
 	}
 	return false
 }
