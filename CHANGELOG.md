@@ -5,6 +5,28 @@
 
 ---
 
+## v0.1.5 — 2026-10-21
+
+**Added**
+
+- **`socks5` / `httpproxy` 新增隧道空闲超时**（AND 逻辑）：两方向（上行+下行）
+  均无数据传输超过阈值时强制关闭两端连接；任一方向有数据即重置共享 `lastActivity`。
+  - 新增 `WithTunnelIdleTimeout(d time.Duration)` Option（两个包对称）；`0` 表示不启用，
+    行为与之前完全一致。
+  - `socks5.Server.pumpTunnel` / `httpproxy.pumpBidirectional` 内部：`io.Copy` 改为经
+    `activityWriter` 包装（每次成功写入更新 `atomic int64` UnixNano 时间戳），起独立
+    看门狗 goroutine（间隔 `idleTimeout/2`，最小 `5s`），超时后 `Close` 两端连接使
+    `io.Copy` 退出。
+  - AND 语义：仅当两方向都空闲超过阈值才关闭；单方向持续有数据不会误杀。
+
+**升级指引**
+
+- 纯新增字段与 Option，**非破坏性**：不设即为 `0`（不启用），旧消费方无需改动即可编译运行。
+- 消费方按需调用 `socks5.WithTunnelIdleTimeout(...)` / `httpproxy.WithTunnelIdleTimeout(...)`
+  启用；建议值 60s~120s，过短会误杀慢速长连接。
+
+---
+
 ## v0.1.4 — 2026-10-21
 
 **Fixed**

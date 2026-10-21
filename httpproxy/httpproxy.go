@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/v2up-32mb/xshared/config"
@@ -28,7 +29,8 @@ type Server struct {
 	dialer        dialer.Dialer
 	bypassMatcher *routing.Matcher
 	userPassAuth  func(user, pass string) bool
-	maxConns      int
+	maxConns          int
+	idleTunnelTimeout time.Duration
 
 	sem      chan struct{}
 	listener net.Listener
@@ -54,6 +56,12 @@ func WithMaxConns(n int) Option {
 	return func(s *Server) {
 		s.maxConns = n
 	}
+}
+
+// WithTunnelIdleTimeout 设置 TCP 隧道空闲超时：两方向均无数据传输超过该阈值时
+// 强制关闭连接（AND 逻辑）。0 表示不启用（默认行为）。
+func WithTunnelIdleTimeout(d time.Duration) Option {
+	return func(s *Server) { s.idleTunnelTimeout = d }
 }
 
 func NewServer(cfg *config.Config, d dialer.Dialer, opts ...Option) *Server {
@@ -192,7 +200,7 @@ func (s *Server) handleConnect(c net.Conn, target, originalHost string) {
 	if _, err := c.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
 		return
 	}
-	pumpBidirectional(c, up)
+	pumpBidirectional(c, up, s.idleTunnelTimeout)
 }
 
 func (s *Server) handleForward(c net.Conn, reader *bufio.Reader, target string, first, pending []byte, originalHost string) {
@@ -212,7 +220,7 @@ func (s *Server) handleForward(c net.Conn, reader *bufio.Reader, target string, 
 		}
 	}
 	// bidirectional pump, client side is original net.Conn
-	pumpBidirectional(c, up)
+	pumpBidirectional(c, up, s.idleTunnelTimeout)
 }
 
 // dialTimeout 返回拨号超时；零值/未配置时回退默认值。
@@ -246,21 +254,73 @@ func (s *Server) dialUpstream(target string, originalHost string) (net.Conn, err
 	return conn, err
 }
 
-func pumpBidirectional(a, b net.Conn) {
-	// 任一方向 EOF 后对对端 TCP CloseWrite（半关闭），保证流式协议
-	// 的 EOF 语义（对齐基线 relayBypassConnections）。
+// activityWriter 包装 io.Writer，每次成功写入后更新共享 lastActivity 时间戳。
+// 刻意不嵌入 net.Conn，以防 io.Copy 经 ReaderFrom 快路径绕过 Write 方法。
+type activityWriter struct {
+	w            io.Writer
+	lastActivity *int64
+}
+
+func (a *activityWriter) Write(p []byte) (int, error) {
+	n, err := a.w.Write(p)
+	if n > 0 {
+		atomic.StoreInt64(a.lastActivity, time.Now().UnixNano())
+	}
+	return n, err
+}
+
+// pumpBidirectional 双向泵：任一方向 EOF 后对对端 TCP CloseWrite（半关闭），
+// 保证流式协议的 EOF 语义（对齐基线 relayBypassConnections）。
+// idleTimeout > 0 时启动看门狗：AND 逻辑——两方向均空闲超过阈值后强制关闭两端连接。
+func pumpBidirectional(a, b net.Conn, idleTimeout time.Duration) {
+	var lastActivity int64
+	atomic.StoreInt64(&lastActivity, time.Now().UnixNano())
+
+	if idleTimeout > 0 {
+		done := make(chan struct{})
+		interval := idleTimeout / 2
+		if interval < 5*time.Second {
+			interval = 5 * time.Second
+		}
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-ticker.C:
+					if time.Since(time.Unix(0, atomic.LoadInt64(&lastActivity))) > idleTimeout {
+						a.Close()
+						b.Close()
+						return
+					}
+				}
+			}
+		}()
+		defer close(done)
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(b, a)
+		var dst io.Writer = b
+		if idleTimeout > 0 {
+			dst = &activityWriter{w: b, lastActivity: &lastActivity}
+		}
+		_, _ = io.Copy(dst, a)
 		if tcp, ok := b.(*net.TCPConn); ok {
 			_ = tcp.CloseWrite()
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(a, b)
+		var dst io.Writer = a
+		if idleTimeout > 0 {
+			dst = &activityWriter{w: a, lastActivity: &lastActivity}
+		}
+		_, _ = io.Copy(dst, b)
 		if tcp, ok := a.(*net.TCPConn); ok {
 			_ = tcp.CloseWrite()
 		}

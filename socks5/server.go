@@ -62,7 +62,8 @@ type Server struct {
 	maxConns      int
 	blockedPorts  []int
 	downQueueSize int
-	downQueueWait time.Duration
+	downQueueWait     time.Duration
+	idleTunnelTimeout time.Duration
 
 	listener      net.Listener
 	sem           chan struct{}
@@ -105,6 +106,12 @@ func WithDownstreamQueue(size int, timeout time.Duration) Option {
 			s.downQueueWait = timeout
 		}
 	}
+}
+
+// WithTunnelIdleTimeout 设置 TCP 隧道空闲超时：两方向均无数据传输超过该阈值时
+// 强制关闭连接（AND 逻辑）。0 表示不启用（默认行为）。
+func WithTunnelIdleTimeout(d time.Duration) Option {
+	return func(s *Server) { s.idleTunnelTimeout = d }
 }
 
 // WithDNSCache 注入 bypass 决策所需的域名解析缓存；缺省使用系统解析器。
@@ -433,7 +440,7 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 
 	s.log.Info("新请求 -> %s:%d", originalHost, port)
 	atomic.AddInt32(&s.activeTunnels, 1)
-	sent, received := pumpTunnel(clientConn, stream)
+	sent, received := pumpTunnel(clientConn, stream, s.idleTunnelTimeout)
 	atomic.AddInt32(&s.activeTunnels, -1)
 
 	elapsed := time.Since(startedAt)
@@ -457,21 +464,74 @@ func halfClose(conn net.Conn) {
 	}
 }
 
+// activityWriter 包装 io.Writer，每次成功写入后更新共享 lastActivity 时间戳。
+// 刻意不嵌入 net.Conn，以防 io.Copy 经 ReaderFrom 快路径绕过 Write 方法。
+type activityWriter struct {
+	w            io.Writer
+	lastActivity *int64
+}
+
+func (a *activityWriter) Write(p []byte) (int, error) {
+	n, err := a.w.Write(p)
+	if n > 0 {
+		atomic.StoreInt64(a.lastActivity, time.Now().UnixNano())
+	}
+	return n, err
+}
+
 // pumpTunnel 双向泵：任一方向 EOF 后对对端调用 halfClose（半关闭），
 // 保证流式协议的 EOF 语义；返回上下行字节数。
-func pumpTunnel(clientConn, stream net.Conn) (sent, received int64) {
+// idleTimeout > 0 时启动看门狗：AND 逻辑——两方向均空闲超过阈值后强制关闭两端连接。
+func pumpTunnel(clientConn, stream net.Conn, idleTimeout time.Duration) (sent, received int64) {
 	type transferResult struct {
 		upload bool
 		bytes  int64
 	}
 	completed := make(chan transferResult, 2)
+
+	var lastActivity int64
+	atomic.StoreInt64(&lastActivity, time.Now().UnixNano())
+
+	if idleTimeout > 0 {
+		done := make(chan struct{})
+		interval := idleTimeout / 2
+		if interval < 5*time.Second {
+			interval = 5 * time.Second
+		}
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-ticker.C:
+					if time.Since(time.Unix(0, atomic.LoadInt64(&lastActivity))) > idleTimeout {
+						clientConn.Close()
+						stream.Close()
+						return
+					}
+				}
+			}
+		}()
+		defer close(done)
+	}
+
 	go func() {
-		n, _ := io.Copy(stream, clientConn)
+		var dst io.Writer = stream
+		if idleTimeout > 0 {
+			dst = &activityWriter{w: stream, lastActivity: &lastActivity}
+		}
+		n, _ := io.Copy(dst, clientConn)
 		halfClose(stream) // 通知远端上行已结束（适配 pipeStream / *net.TCPConn）
 		completed <- transferResult{upload: true, bytes: n}
 	}()
 	go func() {
-		n, _ := io.Copy(clientConn, stream)
+		var dst io.Writer = clientConn
+		if idleTimeout > 0 {
+			dst = &activityWriter{w: clientConn, lastActivity: &lastActivity}
+		}
+		n, _ := io.Copy(dst, stream)
 		halfClose(clientConn)
 		completed <- transferResult{upload: false, bytes: n}
 	}()
@@ -510,7 +570,7 @@ func (s *Server) createDirectTunnel(clientConn net.Conn, originalHost, resolvedH
 
 	s.log.Info("直连绕过 -> %s:%d", originalHost, port)
 	atomic.AddInt32(&s.activeTunnels, 1)
-	sent, received := pumpTunnel(clientConn, targetConn)
+	sent, received := pumpTunnel(clientConn, targetConn, s.idleTunnelTimeout)
 	atomic.AddInt32(&s.activeTunnels, -1)
 
 	s.log.Info("直连完成 -> %s:%d | 耗时=%dms ↑%s ↓%s",
