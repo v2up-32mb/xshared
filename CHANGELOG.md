@@ -5,6 +5,23 @@
 
 ---
 
+## v0.1.4 — 2026-10-21
+
+**Fixed**
+
+- `socks5/server.go`：`pumpTunnel` 的半关闭逻辑由硬编码 `*net.TCPConn` 类型断言改为 `closeWriter` 接口断言。
+  原实现在 `stream` 为 `*pipeStream`（xtunnel 通道流）时类型断言永远失败，导致客户端上行结束后
+  无法通知服务端，下行 `io.Copy` goroutine 永久阻塞；SOCKS5 信号量与 HotPair refs 均无法释放，
+  连接持续积压直至触发并发上限。
+- 新增 `closeWriter` 接口与 `halfClose` 辅助函数，对 `stream` 和 `clientConn` 均调用；
+  `*net.TCPConn` 路径行为不变，`pipeStream` 等实现了 `CloseWrite` 的类型现在可正确触发半关闭。
+
+**升级指引**
+
+- 无 API 变更；`xtunnel` 需同步为 `pipeStream` 实现 `CloseWrite()`（v0.3.3+）。
+
+---
+
 ## 未发版（v0.1.3，待批准打 tag）
 
 **Docs（无代码行为变更；字段注释同步 gcm-worker 的代理语义演进）**

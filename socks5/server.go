@@ -444,7 +444,20 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 	}
 }
 
-// pumpTunnel 双向泵：任一方向 EOF 后对对端 TCP CloseWrite（半关闭），
+// closeWriter 半关闭接口：实现了 CloseWrite 的连接（*net.TCPConn 或 *pipeStream）
+// 可通过此接口通知对端上行已结束，避免硬编码类型断言。
+type closeWriter interface {
+	CloseWrite() error
+}
+
+// halfClose 对连接执行半关闭（CloseWrite）；不支持则跳过。
+func halfClose(conn net.Conn) {
+	if cw, ok := conn.(closeWriter); ok {
+		_ = cw.CloseWrite()
+	}
+}
+
+// pumpTunnel 双向泵：任一方向 EOF 后对对端调用 halfClose（半关闭），
 // 保证流式协议的 EOF 语义；返回上下行字节数。
 func pumpTunnel(clientConn, stream net.Conn) (sent, received int64) {
 	type transferResult struct {
@@ -454,16 +467,12 @@ func pumpTunnel(clientConn, stream net.Conn) (sent, received int64) {
 	completed := make(chan transferResult, 2)
 	go func() {
 		n, _ := io.Copy(stream, clientConn)
-		if tcpConn, ok := stream.(*net.TCPConn); ok {
-			_ = tcpConn.CloseWrite()
-		}
+		halfClose(stream) // 通知远端上行已结束（适配 pipeStream / *net.TCPConn）
 		completed <- transferResult{upload: true, bytes: n}
 	}()
 	go func() {
 		n, _ := io.Copy(clientConn, stream)
-		if tcpConn, ok := clientConn.(*net.TCPConn); ok {
-			_ = tcpConn.CloseWrite()
-		}
+		halfClose(clientConn)
 		completed <- transferResult{upload: false, bytes: n}
 	}()
 	first := <-completed
