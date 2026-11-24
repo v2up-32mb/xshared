@@ -132,3 +132,29 @@ func TestEchManagerSingleflightConcurrentFetch(t *testing.T) {
 		t.Fatalf("dohFunc called %d times after cache fill, want 1", calls)
 	}
 }
+
+func TestEchManagerCleanupExpired(t *testing.T) {
+	cfg := config.DefaultConfig()
+	m := NewEchManager(dns.NewDoHClient(cfg), "ech.example.com", 0, 0)
+
+	m.mu.Lock()
+	m.cache["expired.com"] = &cacheEntry{
+		echConfig: []byte{0x01},
+		expiresAt: time.Now().Add(-1 * time.Second),
+	}
+	m.cache["valid.com"] = &cacheEntry{
+		echConfig: []byte{0x02},
+		expiresAt: time.Now().Add(10 * time.Minute),
+	}
+	m.mu.Unlock()
+
+	cleaned := m.CleanupExpired()
+	if cleaned != 1 {
+		t.Errorf("expected 1 cleaned, got %d", cleaned)
+	}
+
+	total, expired := m.GetCacheStats()
+	if total != 1 || expired != 0 {
+		t.Errorf("expected total=1, expired=0, got total=%d, expired=%d", total, expired)
+	}
+}

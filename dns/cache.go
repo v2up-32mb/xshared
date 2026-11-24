@@ -3,6 +3,7 @@ package dns
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,8 +34,8 @@ type DNSCache struct {
 
 // CacheStats 缓存统计
 type CacheStats struct {
-	Hits   int64
-	Misses int64
+	Hits   atomic.Int64
+	Misses atomic.Int64
 }
 
 // NewDNSCache 创建 DNS 缓存
@@ -81,7 +82,7 @@ func (dc *DNSCache) Get(domain string, queryType string) (string, bool) {
 	}
 
 	// 缓存命中，增加命中计数（原子操作）
-	atomic.AddInt64(&dc.stats.Hits, 1)
+	dc.stats.Hits.Add(1)
 	ttl := int(time.Until(entry.ExpiresAt).Seconds())
 	dc.log.Debug("缓存命中: %s (%s) -> %s (TTL:%ds)", domain, queryType, entry.IP, ttl)
 	return entry.IP, true
@@ -113,7 +114,7 @@ func (dc *DNSCache) ResolveCached(domain string, queryType string) (string, erro
 	}
 
 	// 2. 缓存未命中，执行 DoH 查询
-	atomic.AddInt64(&dc.stats.Misses, 1)
+	dc.stats.Misses.Add(1)
 	ip, err := dc.dohClient.Resolve(domain, queryType)
 	if err != nil {
 		return "", err
@@ -172,7 +173,7 @@ func (dc *DNSCache) GetHTTPS(domain string) (*HTTPSRecord, bool) {
 	}
 
 	// 缓存命中
-	atomic.AddInt64(&dc.stats.Hits, 1)
+	dc.stats.Hits.Add(1)
 	result := entry.HTTPSRecord
 	ttl := int(time.Until(entry.ExpiresAt).Seconds())
 
@@ -189,7 +190,7 @@ func (dc *DNSCache) ResolveHTTPS(domain string) (*HTTPSRecord, error) {
 	}
 
 	// 2. 缓存未命中，执行 DoH 查询
-	atomic.AddInt64(&dc.stats.Misses, 1)
+	dc.stats.Misses.Add(1)
 	record, err := dc.dohClient.ResolveHTTPS(domain)
 	if err != nil {
 		return nil, err
@@ -284,12 +285,10 @@ func (dc *DNSCache) cleanup() {
 
 	beforeSize = len(dc.cache)
 
-	for key, entry := range dc.cache {
-		if now.After(entry.ExpiresAt) {
-			delete(dc.cache, key)
-			cleaned++
-		}
-	}
+	maps.DeleteFunc(dc.cache, func(key string, entry *CacheEntry) bool {
+		return now.After(entry.ExpiresAt)
+	})
+	cleaned = beforeSize - len(dc.cache)
 
 	if cleaned > 0 || beforeSize > 0 {
 		elapsed := time.Since(startTime)
@@ -306,8 +305,8 @@ func (dc *DNSCache) GetStats() CacheStatsInfo {
 	defer dc.mu.RUnlock()
 
 	// 使用原子操作读取统计计数器
-	hits := atomic.LoadInt64(&dc.stats.Hits)
-	misses := atomic.LoadInt64(&dc.stats.Misses)
+	hits := dc.stats.Hits.Load()
+	misses := dc.stats.Misses.Load()
 	total := hits + misses
 	hitRate := 0.0
 	if total > 0 {
@@ -335,7 +334,7 @@ func (dc *DNSCache) Warmup(domains []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	var successCount int64
+	var successCount atomic.Int64
 	var wg sync.WaitGroup
 
 	// 限制并发数为 8，避免瞬间打满 DoH 服务器
@@ -358,13 +357,13 @@ func (dc *DNSCache) Warmup(domains []string) {
 			}
 
 			if _, err := dc.ResolveA(d); err == nil {
-				atomic.AddInt64(&successCount, 1)
+				successCount.Add(1)
 			}
 			if ctx.Err() != nil {
 				return
 			}
 			if _, err := dc.ResolveAAAA(d); err == nil {
-				atomic.AddInt64(&successCount, 1)
+				successCount.Add(1)
 			}
 		}(domain)
 	}
@@ -374,10 +373,10 @@ func (dc *DNSCache) Warmup(domains []string) {
 	elapsed := time.Since(startTime)
 	if ctx.Err() != nil {
 		dc.log.Warn("预热超时截断: 成功%d条, 当前缓存%d条, 耗时%dms",
-			atomic.LoadInt64(&successCount), len(dc.cache), elapsed.Milliseconds())
+			successCount.Load(), len(dc.cache), elapsed.Milliseconds())
 	} else {
 		dc.log.Info("预热完成: 成功%d条, 当前缓存%d条, 耗时%dms",
-			atomic.LoadInt64(&successCount), len(dc.cache), elapsed.Milliseconds())
+			successCount.Load(), len(dc.cache), elapsed.Milliseconds())
 	}
 }
 

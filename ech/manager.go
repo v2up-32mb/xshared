@@ -3,6 +3,7 @@ package ech
 import (
 	"crypto/tls"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
@@ -230,14 +231,12 @@ func (em *EchManager) CleanupExpired() int {
 	defer em.mu.Unlock()
 
 	now := time.Now()
-	cleaned := 0
+	before := len(em.cache)
 
-	for domain, entry := range em.cache {
-		if now.After(entry.expiresAt) {
-			delete(em.cache, domain)
-			cleaned++
-		}
-	}
+	maps.DeleteFunc(em.cache, func(domain string, entry *cacheEntry) bool {
+		return now.After(entry.expiresAt)
+	})
+	cleaned := before - len(em.cache)
 
 	if cleaned > 0 {
 		em.log.Debug("清理了 %d 个过期的 ECH 缓存条目", cleaned)
